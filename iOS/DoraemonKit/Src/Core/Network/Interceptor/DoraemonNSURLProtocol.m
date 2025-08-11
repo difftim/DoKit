@@ -216,7 +216,7 @@ static NSString * const kDoraemonProtocolKey = @"doraemon_protocol_key";
 //    }
 //}
 
-// 去掉一些我们不关心的链接, 与UIWebView的兼容还是要好好考略一下
+// 去掉一些我们不关心的链接
 + (BOOL)ignoreRequest:(NSURLRequest *)request{
     NSString *pathExtension = [request.URL.absoluteString pathExtension];
     //NSArray *blackList = @[@"",@"",@""];
