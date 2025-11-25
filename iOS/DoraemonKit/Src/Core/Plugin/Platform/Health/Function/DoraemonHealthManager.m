@@ -255,20 +255,20 @@
             DoKitLog(@"dokik pId empty");
         }
 
-        [DoraemonNetworkUtil postWithUrlString:@"https://www.dokit.cn/healthCheck/addCheckData" params:dic success:^(NSDictionary * _Nonnull result) {
-            NSInteger code = [result[@"code"] integerValue];
-            if (code == 200) {
-                [DoraemonToastUtil showToastBlack:DoraemonLocalizedString(@"数据上传成功")  inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
-            }else{
-                NSString *msg = result[@"msg"];
-                if (msg) {
-                    [DoraemonToastUtil showToastBlack:msg inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
-                }
-            }
-
-        } error:^(NSError * _Nonnull error) {
-            [DoraemonToastUtil showToastBlack:DoraemonLocalizedString(@"数据上传失败")  inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
-        }];
+//        [DoraemonNetworkUtil postWithUrlString:@"https://www.dokit.cn/healthCheck/addCheckData" params:dic success:^(NSDictionary * _Nonnull result) {
+//            NSInteger code = [result[@"code"] integerValue];
+//            if (code == 200) {
+//                [DoraemonToastUtil showToastBlack:DoraemonLocalizedString(@"数据上传成功")  inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
+//            }else{
+//                NSString *msg = result[@"msg"];
+//                if (msg) {
+//                    [DoraemonToastUtil showToastBlack:msg inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
+//                }
+//            }
+//
+//        } error:^(NSError * _Nonnull error) {
+//            [DoraemonToastUtil showToastBlack:DoraemonLocalizedString(@"数据上传失败")  inView:[UIViewController rootViewControllerForDoraemonHomeWindow].view];
+//        }];
     }
     
     [_cpuPageArray removeAllObjects];
