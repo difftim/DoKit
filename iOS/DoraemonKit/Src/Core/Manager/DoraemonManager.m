@@ -19,10 +19,8 @@
 #import "DoraemonNSLogViewController.h"
 #import "DoraemonNSLogListViewController.h"
 #import "DoraemonHomeWindow.h"
-#import "DoraemonStatisticsUtil.h"
 #import "DoraemonANRManager.h"
 #import "DoraemonLargeImageDetectionManager.h"
-#import "DoraemonMockManager.h"
 #import "DoraemonNetFlowOscillogramWindow.h"
 #import "DoraemonNetFlowManager.h"
 #import "DoraemonHealthManager.h"
@@ -190,14 +188,6 @@ typedef void (^DoraemonPerformanceBlock)(NSDictionary *);
     if (_bigImageDetectionSize > 0){
         [DoraemonLargeImageDetectionManager shareInstance].minimumDetectionSize = _bigImageDetectionSize;
     }
-    
-    //统计开源项目使用量 不用于任何恶意行为
-    [[DoraemonStatisticsUtil shareInstance] upLoadUserInfo];
-    
-    //拉取最新的mock数据
-    [[DoraemonMockManager sharedInstance] queryMockData:^(int flag) {
-        DoKitLog(@"mock get data, flag == %i",flag);
-    }];
     
     //Weex工具的初始化
 #if DoraemonWithWeex
