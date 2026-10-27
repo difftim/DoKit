@@ -14,12 +14,64 @@
 #import "DoraemonHomeWindow.h"
 #import "DoraemonStatusBarViewController.h"
 
+/// 铺满 App 主窗口、垫在最底层的空视图。折叠屏开合、转屏时主窗口的尺寸和安全区先后变化，
+/// 每次变化都通知入口重新停靠；它的安全区就是主窗口的安全区
+@interface DoraemonEntryGeometryProbe : UIView
+@property (nonatomic, copy) void (^geometryDidChange)(void);
+@end
+
+@implementation DoraemonEntryGeometryProbe {
+    CGSize _lastSize;
+    UIEdgeInsets _lastInsets;
+    BOOL _hasReported;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+        self.userInteractionEnabled = NO;
+        self.isAccessibilityElement = NO;
+    }
+    return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    [self reportIfChanged];
+}
+
+- (void)safeAreaInsetsDidChange {
+    [super safeAreaInsetsDidChange];
+    [self reportIfChanged];
+}
+
+- (void)reportIfChanged {
+    CGSize size = self.bounds.size;
+    UIEdgeInsets insets = self.safeAreaInsets;
+    BOOL changed = !_hasReported || !CGSizeEqualToSize(size, _lastSize) || !UIEdgeInsetsEqualToEdgeInsets(insets, _lastInsets);
+    _lastSize = size;
+    _lastInsets = insets;
+    _hasReported = YES;
+    if (changed && self.geometryDidChange) {
+        self.geometryDidChange();
+    }
+}
+
+@end
+
 @interface DoraemonEntryWindow()
 
 @property (nonatomic, strong) UIButton *entryBtn;
 @property (nonatomic, assign) CGFloat kEntryViewSize;
 @property (nonatomic) CGPoint startingPosition;
 @property (nonatomic, strong) UILabel *entryBtnBlingTextLabel;
+/// 停靠在右侧还是左侧，以及停靠的纵向位置；容器尺寸变化（折叠屏开合、转屏）后按它们重新停靠。
+/// 不能读当时的 center：系统在 scene 尺寸变化时会改动这个小窗口的位置
+@property (nonatomic, assign) BOOL dockedToRight;
+@property (nonatomic, assign) CGFloat dockedCenterY;
+@property (nonatomic, strong) DoraemonEntryGeometryProbe *geometryProbe;
+@property (nonatomic, assign) BOOL redockScheduled;
 
 @end
 
@@ -99,12 +151,108 @@
         [self.rootViewController.view addSubview:self.entryBtn];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(pan:)];
         [self addGestureRecognizer:pan];
+
+        self.dockedToRight = self.center.x > CGRectGetWidth([self containerBounds]) / 2.f;
+        self.dockedCenterY = self.center.y;
+        [self installGeometryProbeIfNeeded];
     }
     return self;
 }
 
+#pragma mark - Container
+
+/// App 主窗口：本 scene 的 key window，没有时取第一个铺满 scene 的可见窗口
+- (UIWindow *)mainWindow {
+    if (@available(iOS 15.0, *)) {
+        UIWindow *keyWindow = self.windowScene.keyWindow;
+        if (keyWindow && keyWindow != self) {
+            return keyWindow;
+        }
+    }
+    if (@available(iOS 13.0, *)) {
+        CGRect bounds = [self containerBounds];
+        for (UIWindow *window in self.windowScene.windows) {
+            if (window != self && !window.hidden && CGRectEqualToRect(window.frame, bounds)) {
+                return window;
+            }
+        }
+    }
+    return nil;
+}
+
+- (void)installGeometryProbeIfNeeded {
+    UIWindow *mainWindow = [self mainWindow];
+    if (!mainWindow || self.geometryProbe.superview == mainWindow) {
+        return;
+    }
+    [self.geometryProbe removeFromSuperview];
+    DoraemonEntryGeometryProbe *probe = [[DoraemonEntryGeometryProbe alloc] initWithFrame:mainWindow.bounds];
+    __weak typeof(self) weakSelf = self;
+    probe.geometryDidChange = ^{
+        [weakSelf scheduleRedock];
+    };
+    [mainWindow insertSubview:probe atIndex:0];
+    self.geometryProbe = probe;
+}
+
+/// 所在 scene 的可见区域；折叠屏上 UIScreen.mainScreen 始终报告外屏尺寸，不能用来定位
+- (CGRect)containerBounds {
+    if (@available(iOS 13.0, *)) {
+        if (self.windowScene) {
+            return self.windowScene.coordinateSpace.bounds;
+        }
+    }
+    return [UIScreen mainScreen].bounds;
+}
+
+/// App 主窗口的安全区（含状态栏、折叠屏的系统竖条）；本窗口只有入口大小，自身的安全区没有意义
+- (UIEdgeInsets)containerSafeAreaInsets {
+    if (self.geometryProbe.window) {
+        return self.geometryProbe.safeAreaInsets;
+    }
+    return [self mainWindow].safeAreaInsets;
+}
+
+/// 按停靠的一侧贴边，并把纵向位置限制在安全区内
+- (CGPoint)dockedCenterForY:(CGFloat)y {
+    CGRect bounds = [self containerBounds];
+    UIEdgeInsets insets = [self containerSafeAreaInsets];
+    CGFloat half = _kEntryViewSize / 2.f;
+    CGFloat centerX = self.dockedToRight ? CGRectGetWidth(bounds) - insets.right - half : insets.left + half;
+    CGFloat minY = insets.top + half;
+    CGFloat maxY = CGRectGetHeight(bounds) - insets.bottom - half;
+    CGFloat centerY = MAX(MIN(y, maxY), minY);
+    return CGPointMake(centerX, centerY);
+}
+
+/// 布局过程中系统还会调整这个小窗口的位置（转屏时重新映射坐标），等这一轮结束再停靠；同一轮内多次请求合并为一次
+- (void)scheduleRedock {
+    if (self.redockScheduled) {
+        return;
+    }
+    self.redockScheduled = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self.redockScheduled = NO;
+        [self redockInContainer];
+    });
+}
+
+- (void)redockInContainer {
+    if (self.autoDock) {
+        self.center = [self dockedCenterForY:self.dockedCenterY];
+        return;
+    }
+    CGRect bounds = [self containerBounds];
+    CGFloat half = _kEntryViewSize / 2.f;
+    CGFloat centerX = MAX(MIN(self.center.x, CGRectGetWidth(bounds) - half), half);
+    CGFloat centerY = MAX(MIN(self.center.y, CGRectGetHeight(bounds) - half), half);
+    self.center = CGPointMake(centerX, centerY);
+}
+
 - (void)show{
     self.hidden = NO;
+    [self installGeometryProbeIfNeeded];
+    [self scheduleRedock];
 }
 
 - (void)showClose:(NSNotification *)notification{
@@ -147,17 +295,18 @@
     UIView *panView = panGestureRecognizer.view;
     CGFloat newX = panView.doraemon_centerX+offsetPoint.x;
     CGFloat newY = panView.doraemon_centerY+offsetPoint.y;
+    CGRect bounds = [self containerBounds];
     if (newX < _kEntryViewSize/2) {
         newX = _kEntryViewSize/2;
     }
-    if (newX > DoraemonScreenWidth - _kEntryViewSize/2) {
-        newX = DoraemonScreenWidth - _kEntryViewSize/2;
+    if (newX > CGRectGetWidth(bounds) - _kEntryViewSize/2) {
+        newX = CGRectGetWidth(bounds) - _kEntryViewSize/2;
     }
     if (newY < _kEntryViewSize/2) {
         newY = _kEntryViewSize/2;
     }
-    if (newY > DoraemonScreenHeight - _kEntryViewSize/2) {
-        newY = DoraemonScreenHeight - _kEntryViewSize/2;
+    if (newY > CGRectGetHeight(bounds) - _kEntryViewSize/2) {
+        newY = CGRectGetHeight(bounds) - _kEntryViewSize/2;
     }
     panView.center = CGPointMake(newX, newY);
 }
@@ -177,26 +326,16 @@
         case UIGestureRecognizerStateCancelled:
         {
             CGPoint location = panView.center;
-            CGFloat centerX;
-            CGFloat safeBottom = 0;
-            if (@available(iOS 11.0, *)) {
-               safeBottom = self.safeAreaInsets.bottom;
-            }
-            CGFloat centerY = MAX(MIN(location.y, CGRectGetMaxY([UIScreen mainScreen].bounds)-safeBottom), [UIApplication sharedApplication].statusBarFrame.size.height);
-            if(location.x > CGRectGetWidth([UIScreen mainScreen].bounds)/2.f)
-            {
-                centerX = CGRectGetWidth([UIScreen mainScreen].bounds)-_kEntryViewSize/2;
-            }
-            else
-            {
-                centerX = _kEntryViewSize/2;
-            }
+            self.dockedToRight = location.x > CGRectGetWidth([self containerBounds]) / 2.f;
+            CGPoint docked = [self dockedCenterForY:location.y];
+            self.dockedCenterY = docked.y;
             [[NSUserDefaults standardUserDefaults] setObject:@{
-                                                               @"x":[NSNumber numberWithFloat:centerX],
-                                                               @"y":[NSNumber numberWithFloat:centerY]
+                                                               @"x":[NSNumber numberWithFloat:docked.x],
+                                                               @"y":[NSNumber numberWithFloat:docked.y],
+                                                               @"right":@(self.dockedToRight)
                                                                } forKey:@"FloatViewCenterLocation"];
             [UIView animateWithDuration:0.3 animations:^{
-                panView.center = CGPointMake(centerX, centerY);
+                panView.center = docked;
             }];
         }
 
@@ -211,6 +350,14 @@
     if (dict && dict[@"x"] && dict[@"y"]) {
         self.center = CGPointMake([dict[@"x"] integerValue], [dict[@"y"] integerValue]);
     }
+    // 保存的坐标可能来自另一块屏幕（折叠屏外屏/内屏），停靠侧以保存的为准，再按当前容器重新停靠
+    if (dict[@"right"]) {
+        self.dockedToRight = [dict[@"right"] boolValue];
+    } else {
+        self.dockedToRight = self.center.x > CGRectGetWidth([self containerBounds]) / 2.f;
+    }
+    self.dockedCenterY = self.center.y;
+    [self scheduleRedock];
 }
 
 - (void)configEntryBtnBlingWithText:(NSString *)text backColor:(UIColor *)backColor {
