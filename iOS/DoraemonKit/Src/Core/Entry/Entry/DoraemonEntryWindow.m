@@ -72,6 +72,10 @@
 @property (nonatomic, assign) CGFloat dockedCenterY;
 @property (nonatomic, strong) DoraemonEntryGeometryProbe *geometryProbe;
 @property (nonatomic, assign) BOOL redockScheduled;
+/// 正在由本类写入几何（停靠、拖动），此时的几何变化不算外部改动
+@property (nonatomic, assign) BOOL applyingOwnGeometry;
+@property (nonatomic, assign) BOOL geometryReady;
+@property (nonatomic, assign) NSUInteger lateRedockToken;
 
 @end
 
@@ -155,8 +159,59 @@
         self.dockedToRight = self.center.x > CGRectGetWidth([self containerBounds]) / 2.f;
         self.dockedCenterY = self.center.y;
         [self installGeometryProbeIfNeeded];
+        self.geometryReady = YES;
     }
     return self;
+}
+
+/// 调试入口不需要成为 key window；成为 key 后会参与 scene 尺寸、方向变化的处理
+- (BOOL)canBecomeKeyWindow {
+    return NO;
+}
+
+#pragma mark - External geometry changes
+
+/// 折叠屏开合时，系统会在入口停靠之后再按 scene 尺寸比例改动这个小窗口（真机上横向压缩到约一半），
+/// 主窗口此后不再变化、探针不会再报告；入口自己发现几何被外部改动时重新停靠
+- (void)setFrame:(CGRect)frame {
+    [super setFrame:frame];
+    [self geometryDidChangeExternally];
+}
+
+- (void)setBounds:(CGRect)bounds {
+    [super setBounds:bounds];
+    [self geometryDidChangeExternally];
+}
+
+- (void)setCenter:(CGPoint)center {
+    [super setCenter:center];
+    [self geometryDidChangeExternally];
+}
+
+- (void)setTransform:(CGAffineTransform)transform {
+    [super setTransform:transform];
+    [self geometryDidChangeExternally];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    if (!CGSizeEqualToSize(self.bounds.size, CGSizeMake(_kEntryViewSize, _kEntryViewSize))) {
+        [self geometryDidChangeExternally];
+    }
+}
+
+- (void)geometryDidChangeExternally {
+    if (!self.geometryReady || self.applyingOwnGeometry) {
+        return;
+    }
+    [self scheduleRedock];
+}
+
+- (void)performOwnGeometryChange:(void (^)(void))changes {
+    BOOL wasApplying = self.applyingOwnGeometry;
+    self.applyingOwnGeometry = YES;
+    changes();
+    self.applyingOwnGeometry = wasApplying;
 }
 
 #pragma mark - Container
@@ -190,6 +245,7 @@
     __weak typeof(self) weakSelf = self;
     probe.geometryDidChange = ^{
         [weakSelf scheduleRedock];
+        [weakSelf scheduleLateRedock];
     };
     [mainWindow insertSubview:probe atIndex:0];
     self.geometryProbe = probe;
@@ -237,16 +293,44 @@
     });
 }
 
+/// 开合过渡结束后再停靠一次：系统对这个窗口的改动可能晚于主窗口的变化，也可能不经过上面的 setter
+- (void)scheduleLateRedock {
+    NSUInteger token = ++self.lateRedockToken;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (weakSelf.lateRedockToken == token) {
+            [weakSelf redockInContainer];
+        }
+    });
+}
+
 - (void)redockInContainer {
+    CGPoint center;
     if (self.autoDock) {
-        self.center = [self dockedCenterForY:self.dockedCenterY];
-        return;
+        center = [self dockedCenterForY:self.dockedCenterY];
+    } else {
+        CGRect bounds = [self containerBounds];
+        CGFloat half = _kEntryViewSize / 2.f;
+        CGFloat centerX = MAX(MIN(self.center.x, CGRectGetWidth(bounds) - half), half);
+        CGFloat centerY = MAX(MIN(self.center.y, CGRectGetHeight(bounds) - half), half);
+        center = CGPointMake(centerX, centerY);
     }
-    CGRect bounds = [self containerBounds];
-    CGFloat half = _kEntryViewSize / 2.f;
-    CGFloat centerX = MAX(MIN(self.center.x, CGRectGetWidth(bounds) - half), half);
-    CGFloat centerY = MAX(MIN(self.center.y, CGRectGetHeight(bounds) - half), half);
-    self.center = CGPointMake(centerX, centerY);
+    [self applyEntryGeometryWithCenter:center];
+}
+
+/// 恢复入口的完整几何：无变换、原始尺寸、给定中心
+- (void)applyEntryGeometryWithCenter:(CGPoint)center {
+    [self performOwnGeometryChange:^{
+        self.transform = CGAffineTransformIdentity;
+        self.layer.transform = CATransform3DIdentity;
+        self.bounds = CGRectMake(0, 0, self->_kEntryViewSize, self->_kEntryViewSize);
+        self.center = center;
+        UIView *rootView = self.rootViewController.view;
+        rootView.transform = CGAffineTransformIdentity;
+        rootView.frame = self.bounds;
+        self.entryBtn.transform = CGAffineTransformIdentity;
+        self.entryBtn.frame = rootView.bounds;
+    }];
 }
 
 - (void)show{
@@ -308,7 +392,9 @@
     if (newY > CGRectGetHeight(bounds) - _kEntryViewSize/2) {
         newY = CGRectGetHeight(bounds) - _kEntryViewSize/2;
     }
-    panView.center = CGPointMake(newX, newY);
+    [self performOwnGeometryChange:^{
+        panView.center = CGPointMake(newX, newY);
+    }];
 }
 
 - (void)autoDocking:(UIPanGestureRecognizer *)panGestureRecognizer {
@@ -319,7 +405,9 @@
         {
             CGPoint translation = [panGestureRecognizer translationInView:panView];
             [panGestureRecognizer setTranslation:CGPointZero inView:panView];
-            panView.center = CGPointMake(panView.center.x + translation.x, panView.center.y + translation.y);
+            [self performOwnGeometryChange:^{
+                panView.center = CGPointMake(panView.center.x + translation.x, panView.center.y + translation.y);
+            }];
         }
             break;
         case UIGestureRecognizerStateEnded:
@@ -335,7 +423,9 @@
                                                                @"right":@(self.dockedToRight)
                                                                } forKey:@"FloatViewCenterLocation"];
             [UIView animateWithDuration:0.3 animations:^{
-                panView.center = docked;
+                [self performOwnGeometryChange:^{
+                    panView.center = docked;
+                }];
             }];
         }
 
